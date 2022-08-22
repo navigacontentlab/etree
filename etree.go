@@ -691,11 +691,22 @@ func (e *Element) RemoveChildAt(index int) Token {
 	return t
 }
 
+var cdataSection = []byte("<![CDATA[")
+
 // ReadFrom reads XML from the reader 'ri' and stores the result as a new
 // child of this element.
 func (e *Element) readFrom(ri io.Reader, settings ReadSettings) (n int64, err error) {
+	var (
+		offset int64
+		buf    bytes.Buffer
+	)
+
 	r := newCountReader(ri)
-	dec := xml.NewDecoder(r)
+
+	// Tee decoder reads to a buffer for inspection
+	reader := io.TeeReader(r, &buf)
+
+	dec := xml.NewDecoder(reader)
 	dec.CharsetReader = settings.CharsetReader
 	dec.Strict = !settings.Permissive
 	dec.Entity = settings.Entity
@@ -708,6 +719,7 @@ func (e *Element) readFrom(ri io.Reader, settings ReadSettings) (n int64, err er
 			if len(stack.data) != 1 {
 				return r.bytes, ErrXML
 			}
+
 			return r.bytes, nil
 		case err != nil:
 			return r.bytes, err
@@ -731,10 +743,21 @@ func (e *Element) readFrom(ri io.Reader, settings ReadSettings) (n int64, err er
 			stack.pop()
 		case xml.CharData:
 			data := string(t)
+
 			var flags charDataFlags
 			if isWhitespace(data) {
 				flags = whitespaceFlag
 			}
+
+			peek := buf.Bytes()
+			if len(peek) > 9 {
+				peek = peek[0:9]
+			}
+
+			if bytes.EqualFold(peek, cdataSection) {
+				flags = flags | cdataFlag
+			}
+
 			newCharData(data, flags, top)
 		case xml.Comment:
 			newComment(string(t), top)
@@ -743,6 +766,14 @@ func (e *Element) readFrom(ri io.Reader, settings ReadSettings) (n int64, err er
 		case xml.ProcInst:
 			newProcInst(t.Target, string(t.Inst), top)
 		}
+
+		// Calculate the number of read bytes from the last offset.
+		read := dec.InputOffset() - offset
+
+		// Advance the buffer so that it's located at the input offset.
+		_ = buf.Next(int(read))
+
+		offset = dec.InputOffset()
 	}
 }
 
